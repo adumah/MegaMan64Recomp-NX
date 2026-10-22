@@ -1,0 +1,683 @@
+diff --git a/src/Combiner.cpp b/src/Combiner.cpp
+index c7858372..ad4d742d 100644
+--- a/src/Combiner.cpp
++++ b/src/Combiner.cpp
+@@ -1,3 +1,4 @@
++#include "mm64nx_profile.h"
+ #include <fstream>
+ #include <functional>
+ #include <cstring>
+@@ -304,6 +305,7 @@ void Combiner_Compile_Async(CombinerKey key)
+ 
+ void CombinerInfo::update()
+ {
++	MM64NX_PROFILE(Combiner);
+ 	// TODO: find, why gDP.changed & CHANGED_COMBINE not always works (e.g. Mario Tennis).
+ //	if (gDP.changed & CHANGED_COMBINE) {
+ 		if (gDP.otherMode.cycleType == G_CYC_COPY)
+@@ -318,6 +320,7 @@ void CombinerInfo::update()
+ 
+ void CombinerInfo::setCombine(u64 _mux )
+ {
++	MM64NX_PROFILE(Combiner);
+ 	const CombinerKey key(_mux);
+ 	if (m_pCurrent != nullptr && m_pCurrent->getKey() == key) {
+ 		m_bChanged = false;
+@@ -413,6 +416,14 @@ void CombinerInfo::setPolygonMode(DrawingState _drawingState)
+ 	}
+ }
+ 
++void CombinerInfo::saveShadersStorageIfChanged()
++{
++	if (config.generalEmulation.enableShadersStorage == 0 || m_shadersLoaded >= m_combiners.size())
++		return;
++	gfxContext.saveShadersStorage(m_combiners);
++	m_shadersLoaded = static_cast<u32>(m_combiners.size());
++}
++
+ void CombinerInfo::_saveShadersStorage() const
+ {
+ 	if (m_shadersLoaded >= m_combiners.size())
+diff --git a/src/Combiner.h b/src/Combiner.h
+index bc69b8e7..8a01fee7 100644
+--- a/src/Combiner.h
++++ b/src/Combiner.h
+@@ -160,6 +160,11 @@ private:
+ 	CombinerInfo(const CombinerInfo &) = delete;
+ 
+ 	void _saveShadersStorage() const;
++public:
++	// Saves the shaders storage when combiners were compiled since the last save or load. The storage is otherwise
++	// only saved at shutdown, which a console app closed from the HOME menu never reaches.
++	void saveShadersStorageIfChanged();
++private:
+ 	bool _loadShadersStorage();
+ 
+ 	bool m_bChanged;
+diff --git a/src/FrameBuffer.cpp b/src/FrameBuffer.cpp
+index 9d6ba513..1cf19b32 100644
+--- a/src/FrameBuffer.cpp
++++ b/src/FrameBuffer.cpp
+@@ -52,6 +52,11 @@ FrameBuffer::~FrameBuffer()
+ 	gfxContext.deleteFramebuffer(m_SubFBO);
+ 	if (m_copyFBO != ObjectHandle::defaultFramebuffer)
+ 		gfxContext.deleteFramebuffer(m_copyFBO);
++	for (u32 i = 0; i < 2; ++i) {
++		if (m_interpFBO[i] != ObjectHandle::defaultFramebuffer)
++			gfxContext.deleteFramebuffer(m_interpFBO[i]);
++		textureCache().removeFrameBufferTexture(m_pInterpTexture[i]);
++	}
+ 
+ 	textureCache().removeFrameBufferTexture(m_pTexture);
+ 	textureCache().removeFrameBufferTexture(m_pDepthTexture);
+@@ -436,6 +441,35 @@ void FrameBuffer::_initCopyTexture()
+ 		m_pFrameBufferCopyTexture->frameBufferTexture = CachedTexture::fbMultiSample;
+ }
+ 
++void FrameBuffer::interpCopy(u32 _slot, bool _save)
++{
++	if (m_pInterpTexture[_slot] == nullptr) {
++		m_interpFBO[_slot] = gfxContext.createFramebuffer();
++		m_pInterpTexture[_slot] = textureCache().addFrameBufferTexture(textureTarget::TEXTURE_2D);
++		_initTexture(static_cast<u16>(m_width), VI_GetMaxBufferHeight(static_cast<u16>(m_width)),
++					 m_pTexture->format, m_pTexture->size, m_pInterpTexture[_slot]);
++		_setAndAttachTexture(m_interpFBO[_slot], m_pInterpTexture[_slot], 0, false);
++	}
++
++	Context::BlitFramebuffersParams blitParams;
++	blitParams.readBuffer = _save ? m_FBO : m_interpFBO[_slot];
++	blitParams.drawBuffer = _save ? m_interpFBO[_slot] : m_FBO;
++	blitParams.srcX0 = 0;
++	blitParams.srcY0 = 0;
++	blitParams.srcX1 = m_pTexture->width;
++	blitParams.srcY1 = m_pTexture->height;
++	blitParams.dstX0 = 0;
++	blitParams.dstY0 = 0;
++	blitParams.dstX1 = m_pTexture->width;
++	blitParams.dstY1 = m_pTexture->height;
++	blitParams.mask = blitMask::COLOR_BUFFER;
++	blitParams.filter = textureParameters::FILTER_NEAREST;
++	gfxContext.blitFramebuffers(blitParams);
++
++	gfxContext.bindFramebuffer(bufferTarget::READ_FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
++	frameBufferList().setCurrentDrawBuffer();
++}
++
+ CachedTexture * FrameBuffer::_copyFrameBufferTexture()
+ {
+ 	if (m_copied)
+diff --git a/src/FrameBuffer.h b/src/FrameBuffer.h
+index 6e06dae4..d5b3a391 100644
+--- a/src/FrameBuffer.h
++++ b/src/FrameBuffer.h
+@@ -90,6 +90,12 @@ struct FrameBuffer
+ 	graphics::ObjectHandle m_copyFBO;
+ 	CachedTexture * m_pFrameBufferCopyTexture = nullptr;
+ 
++	// Frame interpolation (switch/gliden64_rt64ex.cpp): copies the color buffer to (_save) or from one of two
++	// saved slots, the real frame and the in-between one.
++	void interpCopy(u32 _slot, bool _save);
++	graphics::ObjectHandle m_interpFBO[2];
++	CachedTexture * m_pInterpTexture[2] = {nullptr, nullptr};
++
+ 	std::vector<u8> m_RdramCopy;
+ 
+ private:
+diff --git a/src/GBI.cpp b/src/GBI.cpp
+index 04236122..cdf0dbb5 100644
+--- a/src/GBI.cpp
++++ b/src/GBI.cpp
+@@ -8,6 +8,8 @@
+ #include "N64.h"
+ #include "GLideN64.h"
+ #include "GBI.h"
++
++void RT64EX_Init();
+ #include "RDP.h"
+ #include "RSP.h"
+ #include "uCodes/F3D.h"
+@@ -228,6 +230,7 @@ void GBIInfo::_makeCurrent(MicrocodeInfo * _pCurrent)
+ 			break;
+ 			case F3DEX2:
+ 				F3DEX2_Init();
++				RT64EX_Init(); // DK64NX: RT64 extended GBI emitted by the recomp's patches
+ 				m_hwlSupported = true;
+ 				gSP.clipRatio = 2U;
+ 			break;
+diff --git a/src/Graphics/OpenGLContext/GLSL/glsl_CombinerProgramUniformFactoryCommon.cpp b/src/Graphics/OpenGLContext/GLSL/glsl_CombinerProgramUniformFactoryCommon.cpp
+index 05f58920..38caba94 100644
+--- a/src/Graphics/OpenGLContext/GLSL/glsl_CombinerProgramUniformFactoryCommon.cpp
++++ b/src/Graphics/OpenGLContext/GLSL/glsl_CombinerProgramUniformFactoryCommon.cpp
+@@ -489,12 +489,17 @@ public:
+ 		float adjustTrans[2] = { 0.0f, 0.0f };
+ 		float adjustScale[2] = { 1.0f, 1.0f };
+ 		if (dwnd().isAdjustScreen() && (gDP.colorImage.width > VI.width * 98 / 100)) {
+-			if (isOrthographicProjection) {
++			if (g_rt64ViewportOrigin < 0x800) {
++				adjustScale[0] = dwnd().getAdjustScale();
++				adjustTrans[0] = RT64EX_OriginX(g_rt64ViewportOrigin, static_cast<f32>(gDP.colorImage.width)) * (1.0f - adjustScale[0]);
++			} else if (g_rt64ProjStretch) {
++				// STRETCH projection (sky, framebuffer effects): drawn for the 4:3 frame, widened with the screen.
++			} else if (isOrthographicProjection) {
+ 				adjustScale[1] = 1.0f / dwnd().getAdjustScale();
+ 				adjustTrans[1] = static_cast<f32>(gDP.colorImage.width) * 3.0f / 4.0f * (1.0f - adjustScale[1]) / 2.0f;
+ 			} else {
+ 				adjustScale[0] = dwnd().getAdjustScale();
+-				adjustTrans[0] = static_cast<f32>(gDP.colorImage.width) * (1.0f - adjustScale[0]) / 2.0f;
++				adjustTrans[0] = RT64EX_OriginX(g_rt64ViewportOrigin, static_cast<f32>(gDP.colorImage.width)) * (1.0f - adjustScale[0]);
+ 			}
+ 		}
+ 		uVTrans.set(gSP.viewport.vtrans[0], gSP.viewport.vtrans[1], _force);
+diff --git a/src/Graphics/OpenGLContext/ThreadedOpenGl/atomicops.h b/src/Graphics/OpenGLContext/ThreadedOpenGl/atomicops.h
+index ff828ca8..513c31d1 100644
+--- a/src/Graphics/OpenGLContext/ThreadedOpenGl/atomicops.h
++++ b/src/Graphics/OpenGLContext/ThreadedOpenGl/atomicops.h
+@@ -349,7 +349,7 @@ extern "C" {
+ }
+ #elif defined(__MACH__)
+ #include <mach/mach.h>
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__SWITCH__)
+ #include <semaphore.h>
+ #endif
+ 
+@@ -483,7 +483,7 @@ namespace moodycamel
+ 				}
+ 			}
+ 		};
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__SWITCH__)
+ 		//---------------------------------------------------------
+ 		// Semaphore (POSIX, Linux)
+ 		//---------------------------------------------------------
+diff --git a/src/GraphicsDrawer.cpp b/src/GraphicsDrawer.cpp
+index 9f7796ff..0069d41d 100644
+--- a/src/GraphicsDrawer.cpp
++++ b/src/GraphicsDrawer.cpp
+@@ -1,3 +1,4 @@
++#include "mm64nx_profile.h"
+ #include <algorithm>
+ #include <string>
+ #include <thread>
+@@ -191,6 +192,10 @@ s32 roundup(f32 _v, f32 _scale)
+ 	return static_cast<s32>(floorf(_v * _scale + 0.5f));
+ }
+ 
++// MM64NX: set while drawing a fill rectangle that covers the whole screen, a clear: it must reach the widescreen areas
++// too, or whatever moves there (sprites entering from the sides) leaves trails.
++static bool g_mm64nxFullScreenFill = false;
++
+ void GraphicsDrawer::updateScissor(FrameBuffer * _pBuffer) const
+ {
+ 	DisplayWindow & wnd = DisplayWindow::get();
+@@ -216,7 +221,7 @@ void GraphicsDrawer::updateScissor(FrameBuffer * _pBuffer) const
+ 		SY1 *= 512.0f / SX1;
+ 	}
+ 
+-	if (_needAdjustCoordinate(wnd))
++	if (_needAdjustCoordinate(wnd) && !g_rt64ScissorWide && g_rt64ViewportOrigin >= 0x800 && !g_mm64nxFullScreenFill)
+ 		_adjustScissorX(SX0, SX1, wnd.getAdjustScale());
+ 
+ 	gfxContext.setScissor(roundup(SX0, scaleX), roundup(SY0, scaleY),
+@@ -647,6 +652,7 @@ void GraphicsDrawer::_updateTextures() const
+ 
+ void GraphicsDrawer::_updateStates(DrawingState _drawingState) const
+ {
++	MM64NX_PROFILE(States);
+ 	CombinerInfo & cmbInfo = CombinerInfo::get();
+ 	cmbInfo.setPolygonMode(_drawingState);
+ 	cmbInfo.update();
+@@ -846,6 +852,19 @@ void GraphicsDrawer::_prepareDrawTriangle(DrawingState _drawingState)
+ 	m_modifyVertices = 0;
+ }
+ 
++// renderTriangles walks every triangle on the CPU only to find how far down the frame buffer was drawn
++// (setBufferChanged grows the buffer's height with it) and, with a software depth copy, to rasterise depth. A main
++// buffer's height is clamped to the VI height and never shrinks, so once it is there the walk changes nothing.
++bool GraphicsDrawer::_maxYKnown() const
++{
++	if (!g_dk64nxSkipKnownMaxY)
++		return false;
++	if (config.frameBufferEmulation.copyDepthToRDRAM == Config::cdSoftwareRender && gDP.otherMode.depthUpdate != 0)
++		return false;
++	const FrameBuffer * pCurrent = frameBufferList().getCurrent();
++	return pCurrent != nullptr && pCurrent->m_isMainBuffer && pCurrent->m_height >= VI.height;
++}
++
+ bool GraphicsDrawer::_canDraw() const
+ {
+ 	return config.frameBufferEmulation.enable == 0 || frameBufferList().getCurrent() != nullptr;
+@@ -853,6 +872,7 @@ bool GraphicsDrawer::_canDraw() const
+ 
+ void GraphicsDrawer::drawTriangles()
+ {
++	MM64NX_PROFILE(Triangles);
+ 	if (triangles.num == 0 || !_canDraw()) {
+ 		triangles.num = 0;
+ 		triangles.maxElement = 0;
+@@ -877,7 +897,7 @@ void GraphicsDrawer::drawTriangles()
+ 			maxY = renderAndDrawTriangles(triangles.vertices.data(), triangles.elements.data(), triangles.num, m_bFlatColors, m_statistics);
+ 		} else {
+ 			gfxContext.drawTriangles(triParams);
+-			maxY = renderTriangles(triangles.vertices.data(), triangles.elements.data(), triangles.num);
++			maxY = _maxYKnown() ? 0.0f : renderTriangles(triangles.vertices.data(), triangles.elements.data(), triangles.num);
+ 		}
+ 		frameBufferList().setBufferChanged(maxY);
+ 		if (config.frameBufferEmulation.copyDepthToRDRAM == Config::cdSoftwareRender &&
+@@ -954,6 +974,7 @@ void GraphicsDrawer::drawScreenSpaceTriangle(u32 _numVtx, graphics::DrawModePara
+ 
+ void GraphicsDrawer::drawDMATriangles(u32 _numVtx)
+ {
++	MM64NX_PROFILE(Triangles);
+ 	if (_numVtx == 0 || !_canDraw())
+ 		return;
+ 	_prepareDrawTriangle(DrawingState::Triangle);
+@@ -975,7 +996,7 @@ void GraphicsDrawer::drawDMATriangles(u32 _numVtx)
+ 		}
+ 		else {
+ 			gfxContext.drawTriangles(triParams);
+-			maxY = renderTriangles(m_dmaVertices.data(), nullptr, _numVtx);
++			maxY = _maxYKnown() ? 0.0f : renderTriangles(m_dmaVertices.data(), nullptr, _numVtx);
+ 		}
+ 		frameBufferList().setBufferChanged(maxY);
+ 		if (config.frameBufferEmulation.copyDepthToRDRAM == Config::cdSoftwareRender &&
+@@ -1119,6 +1140,7 @@ void GraphicsDrawer::drawLine(u32 _v0, u32 _v1, float _width, u32 _flag)
+ 
+ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
+ {
++	MM64NX_PROFILE(Rects);
+ 	m_texrectDrawer.draw();
+ 	m_statistics.fillRects++;
+ 
+@@ -1127,6 +1149,12 @@ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
+ 
+ 	gSP.changed &= ~CHANGED_GEOMETRYMODE; // Don't update cull mode
+ 	gSP.changed &= ~CHANGED_VIEWPORT; // Don't update viewport
++	const u32 width = gDP.colorImage.width;
++	g_mm64nxFullScreenFill = dwnd().isAdjustScreen() && _ulx <= 0 && _uly <= 0 && static_cast<u32>(_lrx) >= width &&
++		gDP.scissor.ulx <= 0.0f && gDP.scissor.uly <= 0.0f && gDP.scissor.lrx >= static_cast<f32>(width) &&
++		static_cast<f32>(_lry) >= gDP.scissor.lry;
++	if (g_mm64nxFullScreenFill)
++		gDP.changed |= CHANGED_SCISSOR;
+ 	if (gSP.changed || gDP.changed)
+ 		_updateStates(DrawingState::Rect);
+ 
+@@ -1165,13 +1193,12 @@ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
+ 	m_rect[3].bc1 = 1.0f;
+ 
+ 	DisplayWindow & wnd = dwnd();
+-	if (wnd.isAdjustScreen() && (gDP.colorImage.width > VI.width * 98 / 100) && (static_cast<u32>(_lrx - _ulx) < VI.width * 9 / 10)) {
+-		const float scale = wnd.getAdjustScale();
+-		const float offsetx = static_cast<f32>(gDP.colorImage.width) * (1.0f - scale) / 2.0f;
+-		for (u32 i = 0; i < 4; ++i) {
+-			m_rect[i].x *= scale;
+-			m_rect[i].x += offsetx;
+-		}
++	if (wnd.isAdjustScreen() && (gDP.colorImage.width > VI.width * 98 / 100) &&
++		RT64EX_ShouldAdjustRect(static_cast<u32>(_lrx - _ulx) < VI.width * 9 / 10)) {
++		f32 xs[4];
++		for (u32 i = 0; i < 4; ++i) xs[i] = m_rect[i].x;
++		RT64EX_AdjustRectX(xs, 4, wnd.getAdjustScale(), static_cast<f32>(gDP.colorImage.width));
++		for (u32 i = 0; i < 4; ++i) m_rect[i].x = xs[i];
+ 	}
+ 
+ 	Context::DrawRectParameters rectParams;
+@@ -1183,6 +1210,11 @@ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
+ 	gfxContext.drawRects(rectParams);
+ 	g_debugger.addRects(rectParams);
+ 	gSP.changed |= CHANGED_GEOMETRYMODE | CHANGED_VIEWPORT;
++	if (g_mm64nxFullScreenFill) {
++		// Back to the 4:3 scissor for what follows.
++		g_mm64nxFullScreenFill = false;
++		gDP.changed |= CHANGED_SCISSOR;
++	}
+ 	dropRenderState();
+ }
+ 
+@@ -1332,6 +1364,7 @@ static bool(*texturedRectSpecial)(const GraphicsDrawer::TexturedRectParams & _pa
+ 
+ void GraphicsDrawer::drawTexturedRect(const TexturedRectParams & _params)
+ {
++	MM64NX_PROFILE(Rects);
+ 	gSP.changed &= ~CHANGED_GEOMETRYMODE; // Don't update cull mode
+ 	m_drawingState = DrawingState::TexRect;
+ 	m_statistics.texRects++;
+@@ -1505,14 +1538,13 @@ void GraphicsDrawer::drawTexturedRect(const TexturedRectParams & _params)
+ 
+ 	if (wnd.isAdjustScreen() && !bUseFbTexture &&
+ 		(_params.forceAjustScale ||
+-		((gDP.colorImage.width > VI.width * 98 / 100) && (static_cast<u32>(_params.lrx - _params.ulx) < VI.width * 9 / 10))))
++		((gDP.colorImage.width > VI.width * 98 / 100) &&
++		 RT64EX_ShouldAdjustRect(static_cast<u32>(_params.lrx - _params.ulx) < VI.width * 9 / 10))))
+ 	{
+-		const float scale = wnd.getAdjustScale();
+-		const float offsetx = static_cast<f32>(gDP.colorImage.width) * (1.0f - scale) / 2.0f;
+-		for (u32 i = 0; i < 4; ++i) {
+-			m_rect[i].x *= scale;
+-			m_rect[i].x += offsetx;
+-		}
++		f32 xs[4];
++		for (u32 i = 0; i < 4; ++i) xs[i] = m_rect[i].x;
++		RT64EX_AdjustRectX(xs, 4, wnd.getAdjustScale(), static_cast<f32>(gDP.colorImage.width));
++		for (u32 i = 0; i < 4; ++i) m_rect[i].x = xs[i];
+ 	}
+ 
+ 	m_rect[0].bc0 = 0.0f;
+diff --git a/src/GraphicsDrawer.h b/src/GraphicsDrawer.h
+index 6da9424e..4b3cb8ed 100644
+--- a/src/GraphicsDrawer.h
++++ b/src/GraphicsDrawer.h
+@@ -213,6 +213,7 @@ private:
+ 	void _updateStates(DrawingState _drawingState) const;
+ 	void _prepareDrawTriangle(DrawingState _drawingState);
+ 	bool _canDraw() const;
++	bool _maxYKnown() const;
+ 	void _drawThickLine(u32 _v0, u32 _v1, float _width, u32 _flag);
+ 
+ 	void _drawOSD(const char *_pText, float _x, float & _y);
+diff --git a/src/RSP.cpp b/src/RSP.cpp
+index b66c782c..b159fcc6 100644
+--- a/src/RSP.cpp
++++ b/src/RSP.cpp
+@@ -56,6 +56,7 @@ void _ProcessDList()
+ 			--pci;
+ 		RSP.nextCmd = _SHIFTR(*(u32*)&RDRAM[RSP.PC[pci]], 24, 8);
+ 
++		RT64EX_OnCommand(RSP.w0, RSP.w1);
+ 		GBI.cmd[RSP.cmd](RSP.w0, RSP.w1);
+ 		RSP_CheckDLCounter();
+ 	}
+diff --git a/src/RSP.h b/src/RSP.h
+index bf3ba27e..1ea24364 100644
+--- a/src/RSP.h
++++ b/src/RSP.h
+@@ -22,7 +22,28 @@ extern RSPInfo RSP;
+ extern u32 DepthClearColor;
+ extern u32 rectDepthBufferCopyFrame;
+ 
+-#define RSP_SegmentToPhysical( segaddr ) ((gSP.segment[(segaddr >> 24) & 0x0F] + (segaddr & RDRAMSize)) & RDRAMSize)
++// DK64NX: RT64's segment rules (fromSegmented + maskPhysicalAddress), including its extended
++// RDRAM mode, live in switch/gliden64_rt64ex.cpp.
++u32 RSP_SegmentToPhysicalEx(u32 segaddr);
++#define RSP_SegmentToPhysical( segaddr ) RSP_SegmentToPhysicalEx(segaddr)
++
++// RT64 extended GBI alignment state (switch/gliden64_rt64ex.cpp) steering the 16:9 "adjust" mode.
++extern bool g_rt64ProjStretch;
++extern bool g_rt64ScissorWide;
++extern bool g_rt64ScissorPlain;
++extern u16 g_rt64ViewportOrigin;
++f32 RT64EX_OriginX(u16 origin, f32 width);
++bool RT64EX_ShouldAdjustRect(bool narrow);
++void RT64EX_AdjustRectX(f32* xs, u32 count, f32 scale, f32 width);
++// Every matrix gSPMatrix loads, for frame interpolation (switch/gliden64_rt64ex.cpp).
++void RT64EX_OnMatrix(u32 address, u8 param, f32 mtx[4][4]);
++void RT64EX_OnVertices(u32 address, u32 size);
++void RT64EX_OnCommand(u32 w0, u32 w1);
++// A culling or branch decision taken on transformed vertices (G_CULLDL, G_BRANCH_Z/W): returns the one to follow.
++bool RT64EX_OnDecision(bool taken);
++// Skip the software pass that only measures how far down triangles reach once the main frame buffer counts as drawn
++// to its full height (GraphicsDrawer.cpp); dev harness: gl maxyskip 0|1.
++extern bool g_dk64nxSkipKnownMaxY;
+ 
+ void RSP_Init();
+ void RSP_ProcessDList();
+diff --git a/src/Textures.cpp b/src/Textures.cpp
+index 847289ab..aa35fd69 100644
+--- a/src/Textures.cpp
++++ b/src/Textures.cpp
+@@ -1,3 +1,4 @@
++#include "mm64nx_profile.h"
+ #include <assert.h>
+ #include <memory.h>
+ #include <algorithm>
+@@ -802,9 +803,18 @@ void TextureCache::_checkHdTexLimit()
+ 	}
+ }
+ 
++size_t TextureCache::cachedTextureBytes() const
++{
++	size_t bytes = 0;
++	for (const CachedTexture & texture : m_textures)
++		bytes += texture.textureBytes;
++	return bytes;
++}
++
+ void TextureCache::_checkCacheSize()
+ {
+-	if (m_textures.size() >= m_maxCacheSize) {
++	// DK64NX: a loop, so a cap lowered at run time (gl texcap) takes effect at once.
++	while (!m_textures.empty() && m_textures.size() >= m_maxCacheSize) {
+ 		CachedTexture& clsTex = m_textures.back();
+ 		if (clsTex.bHDTexture)
+ 			m_hdTexCacheSize -= clsTex.textureBytes;
+@@ -2062,6 +2072,7 @@ void TextureCache::toggleDumpTex()
+ 
+ void TextureCache::update(u32 _t)
+ {
++	MM64NX_PROFILE(Textures);
+ 	const gDPTile * pTile = gSP.textureTile[_t];
+ 	switch (pTile->textureMode) {
+ 	case TEXTUREMODE_BGIMAGE:
+diff --git a/src/Textures.h b/src/Textures.h
+index b129458f..7173b591 100644
+--- a/src/Textures.h
++++ b/src/Textures.h
+@@ -70,6 +70,15 @@ struct TextureCache
+ 
+ 	static TextureCache & get();
+ 
++	// DK64NX: memory counters for the Switch port (switch/render_gliden64.cpp), and the cache cap the dev harness
++	// can lower (gl texcap).
++	size_t cachedTextureCount() const { return m_textures.size(); }
++	size_t frameBufferTextureCount() const { return m_fbTextures.size(); }
++	u32 missCount() const { return m_misses; }
++	size_t cachedTextureBytes() const;
++	size_t maxCacheSize() const { return m_maxCacheSize; }
++	void setMaxCacheSize(size_t _size) { m_maxCacheSize = _size; }
++
+ private:
+ 	TextureCache()
+ 		: m_pDummy(nullptr)
+@@ -113,9 +122,9 @@ private:
+ 	std::vector<u32> m_tempTextureHolder;
+ 
+ #ifdef VC
+-	const size_t m_maxCacheSize = 1500u;
++	size_t m_maxCacheSize = 1500u;
+ #else
+-	const size_t m_maxCacheSize = 8000u;
++	size_t m_maxCacheSize = 8000u;
+ #endif
+ 	u64 m_hdTexCacheSize = 0u;
+ };
+diff --git a/src/gDP.cpp b/src/gDP.cpp
+index a2805c45..6baab364 100644
+--- a/src/gDP.cpp
++++ b/src/gDP.cpp
+@@ -1,3 +1,4 @@
++#include "mm64nx_profile.h"
+ #include <assert.h>
+ #include <algorithm>
+ #include <cmath>
+@@ -488,6 +489,7 @@ void gDPLoadTile32b(u32 uls, u32 ult, u32 lrs, u32 lrt)
+ 
+ void gDPLoadTile(u32 tile, u32 uls, u32 ult, u32 lrs, u32 lrt)
+ {
++	MM64NX_PROFILE(Loads);
+ 	gDPSetTileSize( tile, uls, ult, lrs, lrt );
+ 	gDP.loadTileIdx = tile;
+ 	gDP.loadTile = &gDP.tiles[tile];
+@@ -643,6 +645,7 @@ void gDPLoadBlock32(u32 uls,u32 lrs, u32 dxt)
+ 
+ void gDPLoadBlock(u32 tile, u32 uls, u32 ult, u32 lrs, u32 dxt)
+ {
++	MM64NX_PROFILE(Loads);
+ 	gDPSetTileSize( tile, uls, ult, lrs, dxt );
+ 	gDP.loadTileIdx = tile;
+ 	gDP.loadTile = &gDP.tiles[tile];
+@@ -775,6 +778,8 @@ void gDPLoadTLUT( u32 tile, u32 uls, u32 ult, u32 lrs, u32 lrt )
+ 
+ void gDPSetScissor(u32 mode, s16 xh, s16 yh, s16 xl, s16 yl)
+ {
++	g_rt64ScissorWide = false;
++	g_rt64ScissorPlain = false;
+ 	gDP.scissor.mode = mode;
+ 	gDP.scissor.xh = xh;
+ 	gDP.scissor.yh = yh;
+@@ -988,6 +993,72 @@ void gDPSetKeyGB(u32 cG, u32 sG, u32 wG, u32 cB, u32 sB, u32 wB )
+ 			  cG, sG, wG, cB, sB, wB );
+ }
+ 
++// MM64NX: in the 16:9 adjust mode, 2D images keep the 4:3 image's size and place, so full-screen backgrounds leave the
++// widescreen areas at their sides empty. Mega Man 64's backgrounds are drawn as rows of texture rectangles that start
++// at the screen's left edge or end at its right edge with an edge of their texture; continue such rows outwards.
++// A row of several tiles is a repeating pattern (the pause menu), continued by repeating its tile; a row that is a
++// single wide image (the main menu) is mirrored, which joins without a seam.
++// Only images whose first row starts at the top of the screen count as backgrounds, so that sprites entering the
++// screen from its sides aren't copied.
++static void mm64nxExtendBackgroundRow(GraphicsDrawer & drawer, f32 ulx, f32 uly, f32 lrx, f32 lry, s16 s, s16 t,
++	f32 dsdx, f32 dtdy, bool flip)
++{
++	static u32 backgroundImageAddress = 0;
++	const gDPTile * tile0 = gSP.textureTile[0];
++	if (!dwnd().isAdjustScreen() || flip || dsdx != 1.0f || tile0 == nullptr)
++		return;
++	if (uly == 0.0f)
++		backgroundImageAddress = gDP.textureImage.address;
++	if (gDP.textureImage.address != backgroundImageAddress)
++		return;
++
++	const f32 tileWidth = tile0->flrs - tile0->fuls + 1.0f;
++	if (tileWidth < 16.0f)
++		return;
++	const f32 screenRight = static_cast<f32>(gDP.colorImage.width);
++	const f32 widescreenWidth = screenRight * (1.0f / dwnd().getAdjustScale() - 1.0f) / 2.0f;
++	const f32 startS = _FIXED2FLOAT(s, 5) - tile0->fuls;  // texel of the tile at ulx
++	const f32 endS = startS + (lrx - ulx);                 // texel of the tile at lrx
++	const bool singleImage = tileWidth >= 128.0f;
++	const s16 firstTexel = static_cast<s16>(tile0->fuls * 32.0f);
++	const s16 lastTexel = static_cast<s16>((tile0->fuls + tileWidth) * 32.0f);
++
++	const bool texCoordBoundsValid = gDP.m_texCoordBounds.valid;
++	gDP.m_texCoordBounds.valid = false;
++	auto draw = [&](f32 left, f32 right, s16 startTexel, f32 direction) {
++		GraphicsDrawer::TexturedRectParams extra(left, uly, right, lry, direction * dsdx, dtdy, startTexel, t,
++			false, false, true, frameBufferList().getCurrent());
++		drawer.drawTexturedRect(extra);
++	};
++
++	// Left edge: the row starts at x = 0 and runs to the end of its tile.
++	if (ulx == 0.0f && startS >= 0.0f && startS < tileWidth && fabsf(endS - tileWidth) <= 1.0f) {
++		if (singleImage) {
++			// Mirrored: the texel at x = -1 is the one at x = 0.
++			draw(-widescreenWidth, 0.0f, static_cast<s16>((tile0->fuls + startS + widescreenWidth) * 32.0f), -1.0f);
++		} else {
++			f32 right = 0.0f;
++			f32 width = startS > 0.0f ? startS : tileWidth;
++			while (right > -widescreenWidth) {
++				draw(right - width, right, firstTexel, 1.0f);
++				right -= width;
++				width = tileWidth;
++			}
++		}
++	}
++
++	// Right edge: the row ends at the screen's right edge with the end of its tile.
++	if (fabsf(lrx - screenRight) <= 1.0f && fabsf(endS - tileWidth) <= 1.0f) {
++		if (singleImage) {
++			draw(lrx, screenRight + widescreenWidth, lastTexel, -1.0f);
++		} else {
++			for (f32 left = lrx; left < screenRight + widescreenWidth; left += tileWidth)
++				draw(left, left + tileWidth, firstTexel, 1.0f);
++		}
++	}
++	gDP.m_texCoordBounds.valid = texCoordBoundsValid;
++}
++
+ void gDPTextureRectangle(f32 ulx, f32 uly, f32 lrx, f32 lry, s32 tile, s16 s, s16 t, f32 dsdx, f32 dtdy , bool flip)
+ {
+ 	if (gDP.otherMode.cycleType == G_CYC_COPY) {
+@@ -1043,6 +1114,8 @@ void gDPTextureRectangle(f32 ulx, f32 uly, f32 lrx, f32 lry, s32 tile, s16 s, s1
+ 		drawer.correctTexturedRectParams(params);
+ 	drawer.drawTexturedRect(params);
+ 
++	mm64nxExtendBackgroundRow(drawer, ulx, uly, lrx, lry, s, t, dsdx, dtdy, flip);
++
+ 	gSP.textureTile[0] = textureTileOrg[0];
+ 	gSP.textureTile[1] = textureTileOrg[1];
+ 
+diff --git a/src/gSP.cpp b/src/gSP.cpp
+index ab5ada9d..0aa90ea2 100644
+--- a/src/gSP.cpp
++++ b/src/gSP.cpp
+@@ -1,3 +1,4 @@
++#include "mm64nx_profile.h"
+ #include <math.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -176,6 +177,8 @@ void gSPMatrix( u32 matrix, u8 param )
+ 		return;
+ 	}
+ 
++	RT64EX_OnMatrix(address, param, mtx);
++
+ 	if (param & G_MTX_PROJECTION) {
+ 		if (param & G_MTX_LOAD)
+ 			CopyMatrix( gSP.matrix.projection, mtx );
+@@ -1300,6 +1303,7 @@ u32 gSPLoadVertexData(const Vertex *orgVtx, SPVertex * spVtx, u32 v0, u32 vi, u3
+ 
+ void gSPVertex(u32 a, u32 n, u32 v0)
+ {
++	MM64NX_PROFILE(Vertex);
+ 	DebugMsg(DEBUG_NORMAL, "gSPVertex n = %i, v0 = %i, from %08x\n", n, v0, a);
+ 
+ 	if ((n + v0) > INDEXMAP_SIZE) {
+@@ -1315,6 +1319,8 @@ void gSPVertex(u32 a, u32 n, u32 v0)
+ 		return;
+ 	}
+ 
++	RT64EX_OnVertices(address, n * sizeof(Vertex));
++
+ 	if ((gSP.geometryMode & G_LIGHTING) != 0) {
+ 
+ 		if ((gSP.changed & CHANGED_LIGHT) != 0)
+@@ -1752,7 +1758,7 @@ void gSPBranchLessZ(u32 branchdl, u32 vtx, u32 zval)
+ 
+ 	SPVertex & v = dwnd().getDrawer().getVertex(vtx);
+ 	const u32 zTest = u32((v.z / v.w) * 1023.0f);
+-	if (zTest > 0x03FF || zTest <= zval)
++	if (RT64EX_OnDecision(zTest > 0x03FF || zTest <= zval))
+ 		RSP.PC[RSP.PCi] = address;
+ 
+ 	DebugMsg(DEBUG_NORMAL, "gSPBranchLessZ( 0x%08X, %i, %i );\n", branchdl, vtx, zval );
+@@ -1769,7 +1775,7 @@ void gSPBranchLessW( u32 branchdl, u32 vtx, u32 wval )
+ 	}
+ 
+ 	SPVertex & v = dwnd().getDrawer().getVertex(vtx);
+-	if (v.w < (float)wval)
++	if (RT64EX_OnDecision(v.w < (float)wval))
+ 		RSP.PC[RSP.PCi] = address;
+ 
+ 	DebugMsg(DEBUG_NORMAL, "gSPBranchLessZ( 0x%08X, %i, %i );\n", branchdl, vtx, wval);
+@@ -1907,7 +1913,7 @@ bool gSPCullVertices( u32 v0, u32 vn )
+ 
+ void gSPCullDisplayList( u32 v0, u32 vn )
+ {
+-	if (gSPCullVertices( v0, vn )) {
++	if (RT64EX_OnDecision(gSPCullVertices( v0, vn ))) {
+ 		if (RSP.PCi > 0)
+ 			RSP.PCi--;
+ 		else {
+diff --git a/src/uCodes/F3DEX2.cpp b/src/uCodes/F3DEX2.cpp
+index dc982986..b30ee8be 100644
+--- a/src/uCodes/F3DEX2.cpp
++++ b/src/uCodes/F3DEX2.cpp
+@@ -93,7 +93,7 @@ void F3DEX2_MoveWord( u32 w0, u32 w1 )
+ 			gSPClipRatio( w1 );
+ 			break;
+ 		case G_MW_SEGMENT:
+-			gSPSegment( _SHIFTR( w0, 2, 4 ) , w1 & 0x00FFFFFF );
++			gSPSegment( _SHIFTR( w0, 2, 4 ) , w1 ); // DK64NX: masked in RSP_SegmentToPhysicalEx
+ 			break;
+ 		case G_MW_FOG:
+ 			gSPFogFactor( (s16)_SHIFTR( w1, 16, 16 ), (s16)_SHIFTR( w1, 0, 16 ) );

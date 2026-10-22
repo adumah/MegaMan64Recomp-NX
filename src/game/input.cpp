@@ -466,6 +466,82 @@ const recomp::DefaultN64Mappings recomp::default_n64_controller_mappings = {
     }
 };
 
+#ifdef MM64NX_GLIDEN64
+// The Switch's controller layout, after Mega Man Legends on the PlayStation. Buttons are by position
+// (SDL_CONTROLLER_BUTTON_SOUTH is the Switch's B, where the PlayStation's cross is):
+//   cross (B) jumps, square (Y) fires the buster, triangle (X) fires the special weapon, circle (A) talks/interacts,
+//   R2 (ZR) locks on, L2 (ZL) or R3 looks, Select (Minus) opens the map.
+// The left stick walks forwards and backwards and sidesteps left and right (the N64's L and R); the L and R buttons
+// run left and right (the N64 stick's X axis). The right stick turns the view (src/switch/nx_controls.cpp).
+// The N64 version locks on with Z + R together, so ZR presses both.
+const recomp::DefaultN64Mappings recomp::switch_psx_controller_mappings = {
+    .a = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_SOUTH},
+    },
+    .b = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_WEST},
+    },
+    .l = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = -(SDL_CONTROLLER_AXIS_LEFTX + 1)},
+    },
+    .r = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = (SDL_CONTROLLER_AXIS_LEFTX + 1)},
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = (SDL_CONTROLLER_AXIS_TRIGGERRIGHT + 1)},
+    },
+    .z = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = (SDL_CONTROLLER_AXIS_TRIGGERRIGHT + 1)},
+    },
+    .start = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_START},
+    },
+    .c_left = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_NORTH},
+    },
+    .c_right = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = (SDL_CONTROLLER_AXIS_TRIGGERLEFT + 1)},
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_RIGHTSTICK},
+    },
+    .c_up = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_BACK},
+    },
+    .c_down = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_EAST},
+    },
+    .dpad_left = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_DPAD_LEFT},
+    },
+    .dpad_right = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_DPAD_RIGHT},
+    },
+    .dpad_up = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_DPAD_UP},
+    },
+    .dpad_down = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_DPAD_DOWN},
+    },
+    .analog_left = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_LEFTSHOULDER},
+    },
+    .analog_right = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER},
+    },
+    .analog_up = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = -(SDL_CONTROLLER_AXIS_LEFTY + 1)},
+    },
+    .analog_down = {
+        {.input_type = (uint32_t)InputType::ControllerAnalog, .input_id = (SDL_CONTROLLER_AXIS_LEFTY + 1)},
+    },
+    .toggle_menu = {
+    },
+    .accept_menu = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_SOUTH},
+    },
+    .apply_menu = {
+        {.input_type = (uint32_t)InputType::ControllerDigital, .input_id = SDL_CONTROLLER_BUTTON_START},
+    },
+};
+#endif
+
 void recomp::poll_inputs() {
     InputState.keys = SDL_GetKeyboardState(&InputState.numkeys);
     InputState.keymod = SDL_GetModState();

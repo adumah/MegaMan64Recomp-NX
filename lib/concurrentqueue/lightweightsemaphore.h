@@ -24,6 +24,10 @@ extern "C" {
 }
 #elif defined(__MACH__)
 #include <mach/mach.h>
+#elif defined(__SWITCH__)
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #elif defined(__unix__)
 #include <semaphore.h>
 
@@ -251,6 +255,72 @@ public:
 		{
 			while (sem_post(&m_sema) == -1);
 		}
+	}
+};
+#elif defined(__SWITCH__)
+//---------------------------------------------------------
+// Semaphore (Nintendo Switch, libnx has no POSIX semaphores)
+//---------------------------------------------------------
+class Semaphore
+{
+private:
+	std::mutex m_mutex;
+	std::condition_variable m_cond;
+	int m_count;
+
+	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
+
+public:
+	Semaphore(int initialCount = 0) : m_count(initialCount)
+	{
+		assert(initialCount >= 0);
+	}
+
+	bool wait()
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_cond.wait(lock, [this] { return m_count > 0; });
+		--m_count;
+		return true;
+	}
+
+	bool try_wait()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_count > 0) {
+			--m_count;
+			return true;
+		}
+		return false;
+	}
+
+	bool timed_wait(std::uint64_t usecs)
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		if (!m_cond.wait_for(lock, std::chrono::microseconds(usecs), [this] { return m_count > 0; })) {
+			return false;
+		}
+		--m_count;
+		return true;
+	}
+
+	void signal()
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			++m_count;
+		}
+		m_cond.notify_one();
+	}
+
+	void signal(int count)
+	{
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_count += count;
+		}
+		m_cond.notify_all();
 	}
 };
 #else

@@ -811,9 +811,32 @@ RECOMP_PATCH void func_8002ED90_A190(UIElemQuad *quad) {
                 gSPMatrix(D_801A90F0_1844F0++, mtx, G_MTX_PROJECTION | G_MTX_LOAD | G_MTX_NOPUSH);
                 gSPMatrix(D_801A90F0_1844F0++, &gfxContext->identMtx, G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH);
 
+                //@recomp quads that span the whole screen width (the main menu's floor) are widened into the
+                //widescreen areas at the screen's sides
+                s32 minX = quad->verts[0].v.x;
+                s32 maxX = quad->verts[0].v.x;
+                for (int i = 1; i < 4; i++) {
+                    if (quad->verts[i].v.x < minX) {
+                        minX = quad->verts[i].v.x;
+                    }
+                    if (quad->verts[i].v.x > maxX) {
+                        maxX = quad->verts[i].v.x;
+                    }
+                }
+                s32 fullWidth = (minX <= 0) && (maxX >= SCREEN_WIDTH);
+                // Half of the width a 16:9 screen adds to the 4:3 one, in N64 pixels.
+                s32 widescreenMargin = (SCREEN_WIDTH * 16 / 9 * 3 / 4 - SCREEN_WIDTH) / 2 + 1;
+
                 for (int i = 0; i < 4; i++) {
                     ColoredVert *vert = &quad->verts[i];
                     verts[i].v.ob[0] = vert->v.x;
+                    if (fullWidth) {
+                        if (vert->v.x <= 0) {
+                            verts[i].v.ob[0] = vert->v.x - widescreenMargin;
+                        } else if (vert->v.x >= SCREEN_WIDTH) {
+                            verts[i].v.ob[0] = vert->v.x + widescreenMargin;
+                        }
+                    }
                     verts[i].v.ob[1] = vert->v.y;
                     verts[i].v.ob[2] = 0;
                     verts[i].v.flag = 0;

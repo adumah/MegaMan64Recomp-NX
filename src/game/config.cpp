@@ -11,6 +11,8 @@
 
 #if defined(_WIN32)
 #include <Shlobj.h>
+#elif defined(MM64NX_GLIDEN64)
+#include "nx_platform.h"
 #elif defined(__linux__)
 #include <unistd.h>
 #include <pwd.h>
@@ -156,6 +158,8 @@ std::filesystem::path zelda64::get_app_folder_path() {
    }
 
    CoTaskMemFree(known_path);
+#elif defined(MM64NX_GLIDEN64)
+   recomp_dir = mm64nx::get_app_folder_path();
 #elif defined(__linux__) || defined(__APPLE__)
    // check for APP_FOLDER_PATH env var
    if (getenv("APP_FOLDER_PATH") != nullptr) {

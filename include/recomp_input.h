@@ -150,6 +150,9 @@ namespace recomp {
 
     extern const DefaultN64Mappings default_n64_keyboard_mappings;
     extern const DefaultN64Mappings default_n64_controller_mappings;
+#ifdef MM64NX_GLIDEN64
+    extern const DefaultN64Mappings switch_psx_controller_mappings;
+#endif
 
     constexpr size_t bindings_per_input = 2;
 

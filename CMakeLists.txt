@@ -12,6 +12,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(MM64NX_DESKTOP "Build the Switch port's GLideN64 renderer for the desktop, to debug it without a console." OFF)
+
+if (NINTENDO_SWITCH OR MM64NX_DESKTOP)
+    include(${CMAKE_SOURCE_DIR}/switch/switch.cmake)
+    return()
+endif()
+
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-everything /W4")
 endif()

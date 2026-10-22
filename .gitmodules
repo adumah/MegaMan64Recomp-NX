@@ -19,3 +19,6 @@
 [submodule "MegaMan64RecompSyms"]
 	path = MegaMan64RecompSyms
 	url = https://github.com/MegaMan64Recomp/MegaMan64RecompSyms.git
+[submodule "lib/GLideN64"]
+	path = lib/GLideN64
+	url = https://github.com/gonetz/GLideN64

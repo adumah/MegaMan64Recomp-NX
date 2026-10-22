@@ -3,18 +3,25 @@
 #include <unordered_map>
 #include <vector>
 #include <array>
+#include <atomic>
 #include <filesystem>
 #include <numeric>
 #include <stdexcept>
 #include <cinttypes>
+#include <chrono>
 
+#ifndef MM64NX_GLIDEN64
 #include "nfd.h"
+#endif
 
 #include "ultramodern/ultra64.h"
 #include "ultramodern/ultramodern.hpp"
 #define SDL_MAIN_HANDLED
 #ifdef _WIN32
 #include "SDL.h"
+#elif defined(MM64NX_GLIDEN64)
+#include "SDL2/SDL.h"
+#include "nx_platform.h"
 #else
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_syswm.h"
@@ -82,7 +89,7 @@ ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
     return {};
 }
 
-#if defined(__gnu_linux__)
+#if defined(__gnu_linux__) && !defined(MM64NX_GLIDEN64)
 #include "icon_bytes.h"
 
 bool SetImageAsIcon(const char* filename, SDL_Window* window)
@@ -133,6 +140,16 @@ bool SetImageAsIcon(const char* filename, SDL_Window* window)
 
 SDL_Window* window;
 
+#ifdef MM64NX_GLIDEN64
+ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
+    // GLideN64 creates its OpenGL context on this window from the gfx thread (src/switch/gliden64/core_nx.cpp).
+    window = SDL_CreateWindow("Mega Man 64: Recompiled", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL);
+    if (window == nullptr) {
+        exit_error("Failed to create window: %s\n", SDL_GetError());
+    }
+    return window;
+}
+#else
 ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
     uint32_t flags = SDL_WINDOW_RESIZABLE;
 
@@ -171,9 +188,15 @@ ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::
     static_assert(false && "Unimplemented");
 #endif
 }
+#endif
+
 
 void update_gfx(void*) {
     recomp::handle_events();
+#ifdef MM64NX_GLIDEN64
+    mm64nx::check_frame_rate_buttons();
+    mm64nx::debug_tick();
+#endif
 }
 
 static SDL_AudioCVT audio_convert;
@@ -239,7 +262,8 @@ void queue_samples(int16_t* audio_data, size_t sample_count) {
         throw std::runtime_error("Error using SDL audio converter");
     }
 
-    uint64_t cur_queued_microseconds = uint64_t(SDL_GetQueuedAudioSize(audio_device)) / bytes_per_frame * 1000000 / sample_rate;
+    // The queued audio has already been converted to the output sample rate.
+    uint64_t cur_queued_microseconds = uint64_t(SDL_GetQueuedAudioSize(audio_device)) / bytes_per_frame * 1000000 / output_sample_rate;
     uint32_t num_bytes_to_queue = audio_convert.len_cvt - output_channels * discarded_output_frames * sizeof(swap_buffer[0]);
     float* samples_to_queue = swap_buffer.data() + output_channels * discarded_output_frames / 2;
 
@@ -307,7 +331,12 @@ void reset_audio(uint32_t output_freq) {
         .format = AUDIO_F32,
         .channels = (Uint8)output_channels,
         .silence = 0, // calculated
+#ifdef __SWITCH__
+        // The Switch's audio backend releases a buffer about every 10 ms, which smaller buffers can't keep up with.
+        .samples = 0x400,
+#else
         .samples = 0x100, // Fairly small sample count to reduce the latency of internal buffering
+#endif
         .padding = 0, // unused
         .size = 0, // calculated
         .callback = nullptr,
@@ -315,10 +344,13 @@ void reset_audio(uint32_t output_freq) {
     };
 
 
-    audio_device = SDL_OpenAudioDevice(nullptr, false, &spec_desired, nullptr, 0);
+    SDL_AudioSpec spec_obtained{};
+    audio_device = SDL_OpenAudioDevice(nullptr, false, &spec_desired, &spec_obtained, 0);
     if (audio_device == 0) {
         exit_error("SDL error opening audio device: %s\n", SDL_GetError());
     }
+    printf("Audio device: %s, %d Hz, format 0x%x, %d channels, %d samples\n", SDL_GetCurrentAudioDriver(),
+        spec_obtained.freq, spec_obtained.format, spec_obtained.channels, spec_obtained.samples);
     SDL_PauseAudioDevice(audio_device, 0);
 
     output_sample_rate = output_freq;
@@ -562,6 +594,42 @@ void reorder_texture_pack(recomp::mods::ModContext&) {
 
 #define REGISTER_FUNC(name) recomp::overlays::register_base_export(#name, name)
 
+#ifdef MM64NX_NO_LAUNCHER
+// There's no launcher menu on the Switch yet, so load the ROM from the app folder and start the game automatically.
+// The game is started from the VI callback after a few VIs instead of before the runtime starts, as the VI thread
+// only sets up a placeholder video mode for the game to start with while the game isn't running.
+bool load_autostart_rom() {
+    std::u8string game_id = supported_games[0].game_id;
+
+    if (!recomp::is_rom_valid(game_id)) {
+        recomp::check_all_stored_roms();
+    }
+
+    if (!recomp::is_rom_valid(game_id)) {
+        std::filesystem::path rom_path = zelda64::get_app_folder_path() / "MegaMan64.us.rev1.z64";
+        recomp::RomValidationError error = recomp::select_rom(rom_path, game_id);
+        if (error != recomp::RomValidationError::Good) {
+            fprintf(stderr, "Failed to load ROM from %s (error %d)\n", rom_path.string().c_str(), static_cast<int>(error));
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void autostart_vi_callback() {
+    constexpr int vis_before_start = 10;
+    static int vi_count = 0;
+
+    if (vi_count < vis_before_start && ++vi_count == vis_before_start) {
+        printf("[Switch] Starting game\n");
+        recomp::start_game(supported_games[0].game_id);
+    }
+
+    recomp::update_rumble();
+}
+#endif
+
 int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
@@ -570,6 +638,14 @@ int main(int argc, char** argv) {
         ultramodern::error_handling::message_box(("Invalid version string: " + version_string).c_str());
         return EXIT_FAILURE;
     }
+
+#ifdef __SWITCH__
+    if (mm64nx::is_applet_mode()) {
+        ultramodern::error_handling::message_box("Mega Man 64: Recompiled needs more memory than is available when launched from the album.\n"
+            "Launch it through title override instead (hold R while starting a game).");
+        return EXIT_FAILURE;
+    }
+#endif
 
     // Map this executable into memory and lock it, which should keep it in physical memory. This ensures
     // that there are no stutters from the OS having to load new pages of the executable whenever a new code page is run.
@@ -637,7 +713,12 @@ int main(int argc, char** argv) {
     reset_audio(48000);
 
     // Source controller mappings file
-    if (SDL_GameControllerAddMappingsFromFile("recompcontrollerdb.txt") < 0) {
+#ifdef __SWITCH__
+    const char* controller_db_path = "romfs:/recompcontrollerdb.txt";
+#else
+    const char* controller_db_path = "recompcontrollerdb.txt";
+#endif
+    if (SDL_GameControllerAddMappingsFromFile(controller_db_path) < 0) {
         fprintf(stderr, "Failed to load controller mappings: %s\n", SDL_GetError());
     }
 
@@ -667,6 +748,11 @@ int main(int argc, char** argv) {
     zelda64::register_patches();
     recomputil::register_data_api_exports();
     zelda64::load_config();
+#ifdef MM64NX_GLIDEN64
+    // Controller bindings come from the Switch layout instead of controls.json, as there's no menu to edit them yet.
+    mm64nx::apply_controller_layout();
+    mm64nx::load_frame_rate();
+#endif
 
     recomp::rsp::callbacks_t rsp_callbacks{
         .get_rsp_microcode = get_rsp_microcode,
@@ -696,7 +782,11 @@ int main(int argc, char** argv) {
     };
 
     ultramodern::events::callbacks_t thread_callbacks{
+#ifdef MM64NX_NO_LAUNCHER
+        .vi_callback = autostart_vi_callback,
+#else
         .vi_callback = recomp::update_rumble,
+#endif
         .gfx_init_callback = recompui::update_supported_options,
     };
 
@@ -761,9 +851,19 @@ int main(int argc, char** argv) {
         .message_queue_control = {},
     };
 
+#ifdef MM64NX_NO_LAUNCHER
+    if (!load_autostart_rom()) {
+        return EXIT_FAILURE;
+    }
+#endif
+
     recomp::start(cfg);
 
+#ifdef MM64NX_GLIDEN64
+    printf("[Switch] Runtime exited\n");
+#else
     NFD_Quit();
+#endif
 
     if (preloaded) {
         release_preload(preload_context);

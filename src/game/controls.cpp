@@ -1,8 +1,14 @@
 #include <array>
+#include <chrono>
+#include <cmath>
 
 #include "librecomp/helpers.hpp"
 #include "recomp_input.h"
 #include "ultramodern/ultramodern.hpp"
+
+#ifdef MM64NX_GLIDEN64
+#include "nx_platform.h"
+#endif
 
 // Arrays that hold the mappings for every input for keyboard and controller respectively.
 using input_mapping = std::array<recomp::InputField, recomp::bindings_per_input>;
@@ -90,6 +96,22 @@ bool recomp::get_n64_input(int controller_num, uint16_t* buttons_out, float* x_o
             cur_buttons |= recomp::get_input_digital(keyboard_input_mappings[input_index]) ? n64_button_values[i] : 0;
             cur_buttons |= recomp::get_input_digital(controller_input_mappings[input_index]) ? n64_button_values[i] : 0;
         }
+
+#ifdef MM64NX_GLIDEN64
+        // The right stick turns the view: it turns Mega Man, and the game's camera follows behind him. Pushing it
+        // down turns him around.
+        float right_x, right_y;
+        recomp::get_right_analog(&right_x, &right_y);
+        right_x += mm64nx::scripted_right_x();
+        cur_buttons |= mm64nx::scripted_buttons();
+        mm64nx::turn_view(right_x, right_y);
+        // Holding the right stick up locks on, like ZR: Z and R together, as on the N64.
+        constexpr float right_stick_lock_on_threshold = 0.6f;
+        if (right_y < -right_stick_lock_on_threshold) {
+            cur_buttons |= n64_button_values[(size_t)GameInput::Z - (size_t)GameInput::N64_BUTTON_START] |
+                n64_button_values[(size_t)GameInput::R - (size_t)GameInput::N64_BUTTON_START];
+        }
+#endif
 
         float joystick_deadzone = recomp::get_joystick_deadzone() / 100.0f;
 

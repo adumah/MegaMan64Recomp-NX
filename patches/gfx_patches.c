@@ -385,7 +385,7 @@ RECOMP_PATCH void func_800276EC_2AEC(s32 arg0) {
     //@recomp reset the interpolation flag after rendering frame
     set_all_interpolation_skipped(FALSE);
     skip_terrain_interpolation = FALSE;
-    recomp_printf("-----End Frame----- \n");
+    // recomp_printf("-----End Frame----- \n");
 }
 
 void recomp_interp(u32 id) {
